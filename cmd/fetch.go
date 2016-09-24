@@ -66,7 +66,7 @@ var fetchCmd = &cobra.Command{
 
 		for _, s := range c.Servers {
 			log.Println(s)
-			nntp.BuildNNTPWorkers(workQueue, s.Connections, s.Port, s.Host, s.Username, s.Password, true, "incomplete")
+			nntp.BuildWorkers(workQueue, s.Connections, s.Port, s.Host, s.Username, s.Password, true, "incomplete")
 		}
 
 		for _, arg := range args {
