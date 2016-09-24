@@ -13,24 +13,24 @@ import (
 	"github.com/thebigjc/nzb/yenc"
 )
 
-var CRLF []byte = []byte{'\r', '\n'}
+var crlf = []byte{'\r', '\n'}
 
-type NNTPConfInfo struct {
+type ConfInfo struct {
 	port   int
 	host   string
 	user   string
 	pass   string
-	useTls bool
+	useTLS bool
 	outDir string
 }
 
-func BuildNNTPWorkers(workQueue chan *nzbfile.SegmentRequest, conn, port int, host, user, pass string, useTls bool, outDir string) {
-	connInfo := NNTPConfInfo{
+func BuildWorkers(workQueue chan *nzbfile.SegmentRequest, conn, port int, host, user, pass string, useTLS bool, outDir string) {
+	connInfo := ConfInfo{
 		port,
 		host,
 		user,
 		pass,
-		useTls,
+		useTLS,
 		outDir,
 	}
 
@@ -59,18 +59,18 @@ func BuildNNTPWorkers(workQueue chan *nzbfile.SegmentRequest, conn, port int, ho
 	}()
 }
 
-type NNTPWorker struct {
+type Worker struct {
 	ID          int
 	Work        chan *nzbfile.SegmentRequest
 	WorkerQueue chan chan *nzbfile.SegmentRequest
 	QuitChan    chan bool
-	Config      *NNTPConfInfo
+	Config      *ConfInfo
 	rw          *bufio.ReadWriter
 }
 
-func NewNNTPWorker(id int, workerQueue chan chan *nzbfile.SegmentRequest, connInfo *NNTPConfInfo) NNTPWorker {
+func NewNNTPWorker(id int, workerQueue chan chan *nzbfile.SegmentRequest, connInfo *ConfInfo) Worker {
 	// Create, and return the worker.
-	worker := NNTPWorker{
+	worker := Worker{
 		ID:          id,
 		Work:        make(chan *nzbfile.SegmentRequest),
 		WorkerQueue: workerQueue,
@@ -81,7 +81,7 @@ func NewNNTPWorker(id int, workerQueue chan chan *nzbfile.SegmentRequest, connIn
 	return worker
 }
 
-func (w *NNTPWorker) ReadRetcode() (retcode int, err error) {
+func (w *Worker) ReadRetcode() (retcode int, err error) {
 	line, _, err := w.rw.ReadLine()
 
 	if err != nil {
@@ -93,13 +93,13 @@ func (w *NNTPWorker) ReadRetcode() (retcode int, err error) {
 	return retcode, err
 }
 
-func (w *NNTPWorker) SendLine(line string, expectedRet int) (retcode int, err error) {
+func (w *Worker) SendLine(line string, expectedRet int) (retcode int, err error) {
 	_, err = w.rw.Write([]byte(line))
 	if err != nil {
 		return -1, err
 	}
 
-	_, err = w.rw.Write(CRLF)
+	_, err = w.rw.Write(crlf)
 	if err != nil {
 		return -1, err
 	}
@@ -117,19 +117,19 @@ func (w *NNTPWorker) SendLine(line string, expectedRet int) (retcode int, err er
 	return retcode, nil
 }
 
-type CounterReader struct {
+type counterReader struct {
 	Count int
 	r     io.Reader
 }
 
-func (c *CounterReader) Read(p []byte) (n int, err error) {
+func (c *counterReader) Read(p []byte) (n int, err error) {
 	n, err = c.r.Read(p)
 	c.Count += n
 	return n, err
 }
 
-func (w *NNTPWorker) Start() {
-	if w.Config.useTls {
+func (w *Worker) Start() {
+	if w.Config.useTLS {
 		port := w.Config.port
 		if port == 0 {
 			port = 563
@@ -190,7 +190,7 @@ func (w *NNTPWorker) Start() {
 					break
 				}
 
-				cr := &CounterReader{r: w.rw.Reader}
+				cr := &counterReader{r: w.rw.Reader}
 				y, err := yenc.ReadYenc(cr)
 
 				if err != nil {
@@ -221,7 +221,7 @@ func (w *NNTPWorker) Start() {
 // Stop tells the worker to stop listening for work requests.
 //
 // Note that the worker will only stop *after* it has finished its work.
-func (w *NNTPWorker) Stop() {
+func (w *Worker) Stop() {
 	go func() {
 		w.QuitChan <- true
 	}()

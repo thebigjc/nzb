@@ -109,14 +109,14 @@ func (y *Yenc) parseYEnd(line string) {
 }
 
 func ReadYenc(r io.Reader) (*Yenc, error) {
-	br := bufio.NewReader(r)
-
-	lines := make([]byte, 0)
+	var lines []byte
 	var y Yenc
 	y.crcHash = crc32.NewIEEE()
 	eof := []byte{'.'}
 	dotdot := []byte{'.', '.'}
 	outside := true
+
+	br := bufio.NewReader(r)
 
 	for {
 		line, err := br.ReadBytes('\n')
@@ -172,7 +172,7 @@ func ReadYenc(r io.Reader) (*Yenc, error) {
 	}
 }
 
-var CRLF []byte = []byte{'\r', '\n'}
+var crlf = []byte{'\r', '\n'}
 
 func (y *Yenc) decode(line []byte) []byte {
 	i, j := 0, 0
