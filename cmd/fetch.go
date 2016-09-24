@@ -17,21 +17,29 @@ package cmd
 import (
 	"io/ioutil"
 	"log"
+	"os/user"
+	"path"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/thebigjc/nzb/nntp"
 	"github.com/thebigjc/nzb/nzbfile"
+	"gopkg.in/yaml.v2"
 )
 
 type config struct {
-	Port     int
-	Host     string
-	Username string
-	Password string
-	Conn     int
-	UseTLS   bool `mapstructure:"use-tls"`
+	Servers []Server
+}
+
+type Server struct {
+	Port        int
+	Connections int
+	Host        string
+	Password    string
+	Username    string
 }
 
 // fetchCmd represents the fetch command
@@ -40,14 +48,27 @@ var fetchCmd = &cobra.Command{
 	Short: "fetch the contents of an nzb file from a news server",
 	Long:  `Given an NZB file, fetch the associated files from a Usenet server.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		usr, _ := user.Current()
+		configBytes, err := ioutil.ReadFile(path.Join(usr.HomeDir, ".nzb.yaml"))
+		if err != nil {
+			log.Fatalln("Error reading config file", err)
+		}
 		var c config
-		viper.Unmarshal(&c)
+		err = yaml.Unmarshal(configBytes, &c)
+		if err != nil {
+			log.Fatalln("Error parsing config file", err)
+		}
 		log.Println("fetch called")
 		workQueue := make(chan *nzbfile.SegmentRequest, 100)
 		var wg sync.WaitGroup
 
-		nntp.BuildNNTPWorkers(workQueue, c.Conn, c.Port, c.Host, c.Username, c.Password, c.UseTLS)
-		// Validate config here
+		log.Printf("Found %d servers\n", len(c.Servers))
+
+		for _, s := range c.Servers {
+			log.Println(s)
+			nntp.BuildNNTPWorkers(workQueue, s.Connections, s.Port, s.Host, s.Username, s.Password, true, "incomplete")
+		}
+
 		for _, arg := range args {
 			FetchNzbFromFile(arg, workQueue, &wg)
 		}
@@ -61,7 +82,10 @@ func FetchNzbFromFile(filename string, workQueue chan *nzbfile.SegmentRequest, w
 		log.Fatalf("Error reading from %s: %v\n", filename, err)
 	}
 
-	nzbFile, err := nzbfile.NewNZB(nzbBytes)
+	basename := path.Base(filename)
+	name := strings.TrimSuffix(basename, filepath.Ext(basename))
+
+	nzbFile, err := nzbfile.NewNZB(nzbBytes, name)
 	if err != nil {
 		log.Fatalf("Error parsing %s: %v\n", filename, err)
 	}
@@ -74,13 +98,14 @@ func init() {
 
 	flags := fetchCmd.Flags()
 
-	flagNames := []string{"host", "port", "username", "password", "use-tls", "conn"}
+	flagNames := []string{"host", "port", "username", "password", "use-tls", "conn", "incomplete"}
 
 	flags.String("host", "", "The newsreader host to download from")
 	flags.Int("port", 0, "The newsreader port to download from")
 	flags.Int("conn", 10, "The number of connections to open")
 	flags.String("username", "", "The user to login as")
 	flags.String("password", "", "The password to login with")
+	flags.String("incomplete", "incomplete", "The directory to store downloads in")
 	flags.Bool("use-tls", true, "Whether to use TLS to talk to the server")
 
 	for _, flag := range flagNames {

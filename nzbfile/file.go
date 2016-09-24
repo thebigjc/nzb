@@ -2,17 +2,22 @@ package nzbfile
 
 import (
 	"encoding/xml"
+	"io"
+	"log"
+	"os"
+	"path"
 	"regexp"
 	"strings"
 	"sync"
 
 	"github.com/cheggaaa/pb"
-	"github.com/thebigjc/nzb/yenc"
 )
 
 type Nzb struct {
-	File   []File `xml:"file"`
-	fileRe *regexp.Regexp
+	File     []File `xml:"file"`
+	jobName  string
+	fileRe   *regexp.Regexp
+	progress *pb.ProgressBar
 }
 
 type File struct {
@@ -24,7 +29,7 @@ type File struct {
 }
 
 type Segment struct {
-	Bytes     string `xml:"bytes,attr"`
+	Bytes     int64  `xml:"bytes,attr"`
 	Number    int    `xml:"number,attr"`
 	MessageID string `xml:",chardata"`
 }
@@ -34,33 +39,56 @@ type SegmentRequest struct {
 	MessageID string
 	filename  string
 	workGroup *sync.WaitGroup
+	nzb       *Nzb
 }
 
-var bars map[string]*pb.ProgressBar = make(map[string]*pb.ProgressBar)
+func (s *SegmentRequest) BuildWriter(outDir string, filename string) (io.WriterAt, error) {
+	dirName := path.Join(outDir, s.nzb.jobName)
 
-func (s *SegmentRequest) Observe(y *yenc.Yenc) {
-	defer s.workGroup.Done()
-
-	bar, ok := bars[y.Name]
-
-	if !ok {
-		bar = pb.StartNew(y.Size).Prefix(y.Name)
-		bar.ShowSpeed = true
-		bar.SetUnits(pb.U_BYTES)
-		bars[y.Name] = bar
+	err := os.MkdirAll(dirName, 0777)
+	if err != nil {
+		return nil, err
 	}
 
-	bar.Add(y.EndSize)
+	outName := path.Join(outDir, s.nzb.jobName, filename)
+	f, err := os.OpenFile(outName, os.O_WRONLY|os.O_CREATE, 0666)
+	if err != nil {
+		return nil, err
+	}
+
+	return f, nil
 }
 
-func NewNZB(nzbfile []byte) (*Nzb, error) {
-	nzb := Nzb{}
+func (s *SegmentRequest) Observe(count int) {
+	s.nzb.Complete(count)
+	s.workGroup.Done()
+}
+
+func NewNZB(nzbfile []byte, jobName string) (*Nzb, error) {
+	nzb := Nzb{jobName: jobName, fileRe: regexp.MustCompile(`"(.*)"`)}
 	err := xml.Unmarshal(nzbfile, &nzb)
 	if err != nil {
 		return nil, err
 	}
 
-	nzb.fileRe = regexp.MustCompile(`"(.*)"`)
+	var size int64
+
+	for _, file := range nzb.File {
+		if strings.Contains(file.Subject, "par2") {
+			continue
+		}
+		for _, seg := range file.Segment {
+			size += seg.Bytes
+		}
+	}
+
+	log.Println("Unmarshall", len(nzb.File), size)
+
+	bar := pb.New64(size).Prefix(jobName + " ")
+	bar.ShowSpeed = true
+	bar.SetUnits(pb.U_BYTES)
+	bar.Start()
+	nzb.progress = bar
 
 	return &nzb, nil
 }
@@ -82,10 +110,14 @@ func (n *Nzb) EnqueueFetches(workQueue chan *SegmentRequest, wg *sync.WaitGroup)
 		}
 		for _, seg := range file.Segment {
 			wg.Add(1)
-			seg := SegmentRequest{group: file.Group, MessageID: seg.MessageID, filename: filename, workGroup: wg}
+			seg := SegmentRequest{group: file.Group, MessageID: seg.MessageID, filename: filename, workGroup: wg, nzb: n}
 			go func(seg *SegmentRequest) {
 				workQueue <- seg
 			}(&seg)
 		}
 	}
+}
+
+func (n *Nzb) Complete(bytes int) {
+	n.progress.Add(bytes)
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log"
 	"strconv"
 
@@ -14,21 +15,23 @@ import (
 
 var CRLF []byte = []byte{'\r', '\n'}
 
-type NNTPConnInfo struct {
+type NNTPConfInfo struct {
 	port   int
 	host   string
 	user   string
 	pass   string
 	useTls bool
+	outDir string
 }
 
-func BuildNNTPWorkers(workQueue chan *nzbfile.SegmentRequest, conn, port int, host, user, pass string, useTls bool) {
-	connInfo := NNTPConnInfo{
+func BuildNNTPWorkers(workQueue chan *nzbfile.SegmentRequest, conn, port int, host, user, pass string, useTls bool, outDir string) {
+	connInfo := NNTPConfInfo{
 		port,
 		host,
 		user,
 		pass,
 		useTls,
+		outDir,
 	}
 
 	var workerQueue chan chan *nzbfile.SegmentRequest
@@ -37,7 +40,7 @@ func BuildNNTPWorkers(workQueue chan *nzbfile.SegmentRequest, conn, port int, ho
 	for i := 0; i < conn; i++ {
 		log.Println("Opening connection:", i+1)
 		worker := NewNNTPWorker(i+1, workerQueue, &connInfo)
-		worker.Start()
+		go worker.Start()
 	}
 
 	go func() {
@@ -61,18 +64,18 @@ type NNTPWorker struct {
 	Work        chan *nzbfile.SegmentRequest
 	WorkerQueue chan chan *nzbfile.SegmentRequest
 	QuitChan    chan bool
-	ConnInfo    *NNTPConnInfo
+	Config      *NNTPConfInfo
 	rw          *bufio.ReadWriter
 }
 
-func NewNNTPWorker(id int, workerQueue chan chan *nzbfile.SegmentRequest, connInfo *NNTPConnInfo) NNTPWorker {
+func NewNNTPWorker(id int, workerQueue chan chan *nzbfile.SegmentRequest, connInfo *NNTPConfInfo) NNTPWorker {
 	// Create, and return the worker.
 	worker := NNTPWorker{
 		ID:          id,
 		Work:        make(chan *nzbfile.SegmentRequest),
 		WorkerQueue: workerQueue,
 		QuitChan:    make(chan bool),
-		ConnInfo:    connInfo,
+		Config:      connInfo,
 	}
 
 	return worker
@@ -114,16 +117,27 @@ func (w *NNTPWorker) SendLine(line string, expectedRet int) (retcode int, err er
 	return retcode, nil
 }
 
+type CounterReader struct {
+	Count int
+	r     io.Reader
+}
+
+func (c *CounterReader) Read(p []byte) (n int, err error) {
+	n, err = c.r.Read(p)
+	c.Count += n
+	return n, err
+}
+
 func (w *NNTPWorker) Start() {
-	if w.ConnInfo.useTls {
-		port := w.ConnInfo.port
+	if w.Config.useTls {
+		port := w.Config.port
 		if port == 0 {
 			port = 563
 		}
 
 		var err error
 
-		conn, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", w.ConnInfo.host, port), nil)
+		conn, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", w.Config.host, port), nil)
 		if err != nil {
 			log.Panicf("Worker %d couldn't connect %v\n", w.ID, err)
 			return
@@ -142,14 +156,14 @@ func (w *NNTPWorker) Start() {
 
 		log.Println("Connected", w.ID)
 
-		userLoginStr := fmt.Sprintf("AUTHINFO USER %s", w.ConnInfo.user)
+		userLoginStr := fmt.Sprintf("AUTHINFO USER %s", w.Config.user)
 		retcode, err = w.SendLine(userLoginStr, 381)
 
 		if err != nil {
 			log.Panicln("User failed", err)
 		}
 
-		userPassStr := fmt.Sprintf("AUTHINFO PASS %s", w.ConnInfo.pass)
+		userPassStr := fmt.Sprintf("AUTHINFO PASS %s", w.Config.pass)
 		retcode, err = w.SendLine(userPassStr, 281)
 
 		if err != nil {
@@ -172,26 +186,28 @@ func (w *NNTPWorker) Start() {
 				retcode, err := w.SendLine(articleLine, 222)
 				if err != nil {
 					log.Println("Failed to fetch article", work.MessageID, retcode, err)
-					work.Observe(nil)
+					work.Observe(0)
 					break
 				}
 
-				//headers, err := w.ReadLines("")
-				//#log.Println("Read header", work.MessageID, len(headers))
-				var y yenc.Yenc
-				err = y.ReadBody(w.rw.Reader)
+				cr := &CounterReader{r: w.rw.Reader}
+				y, err := yenc.ReadYenc(cr)
 
 				if err != nil {
 					log.Fatalln("Failed to read body", err)
 				}
 
-				go func(y *yenc.Yenc, s *nzbfile.SegmentRequest) {
-					err := y.SaveBody()
+				go func(y *yenc.Yenc, s *nzbfile.SegmentRequest, outDir string, count int) {
+					w, err := s.BuildWriter(outDir, y.Name)
+					if err != nil {
+						log.Fatalln("Failed to create writer", err)
+					}
+					err = y.SaveBody(w)
 					if err != nil {
 						log.Fatalln("Failed to save message body.", err)
 					}
-					s.Observe(y)
-				}(&y, work)
+					s.Observe(count)
+				}(y, work, w.Config.outDir, cr.Count)
 
 			case <-w.QuitChan:
 				// We have been asked to stop.

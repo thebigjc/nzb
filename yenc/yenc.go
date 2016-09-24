@@ -7,7 +7,6 @@ import (
 	"hash/crc32"
 	"io"
 	"log"
-	"os"
 	"strconv"
 	"strings"
 
@@ -109,23 +108,26 @@ func (y *Yenc) parseYEnd(line string) {
 	}
 }
 
-func (y *Yenc) ReadBody(r *bufio.Reader) error {
+func ReadYenc(r io.Reader) (*Yenc, error) {
+	br := bufio.NewReader(r)
+
 	lines := make([]byte, 0)
+	var y Yenc
 	y.crcHash = crc32.NewIEEE()
 	eof := []byte{'.'}
 	dotdot := []byte{'.', '.'}
 	outside := true
 
 	for {
-		line, err := r.ReadBytes('\n')
+		line, err := br.ReadBytes('\n')
 
 		if err == io.EOF {
 			y.body = lines
-			return nil
+			return &y, nil
 		}
 
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		line = bytes.TrimRight(line, "\r\n")
@@ -140,7 +142,7 @@ func (y *Yenc) ReadBody(r *bufio.Reader) error {
 
 		if bytes.Compare(line, eof) == 0 {
 			y.body = lines
-			return nil
+			return &y, nil
 		}
 
 		if line[0] == '=' {
@@ -195,7 +197,7 @@ func (y *Yenc) decode(line []byte) []byte {
 	return line[:len(line)-(i-j)]
 }
 
-func (y *Yenc) SaveBody() error {
+func (y *Yenc) SaveBody(w io.WriterAt) error {
 	sum := y.crcHash.Sum32()
 
 	if y.EndSize != len(y.body) {
@@ -206,17 +208,7 @@ func (y *Yenc) SaveBody() error {
 		return errors.Errorf("Part crc32 doesn't match %d != %d", y.pcrc32, sum)
 	}
 
-	f, err := os.OpenFile(y.Name, os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+	_, err := w.WriteAt(y.body, int64(y.begin-1))
 
-	_, err = f.Seek(int64(y.begin)-1, 0)
-	if err != nil {
-		return err
-	}
-	f.Write(y.body)
-
-	return nil
+	return err
 }
