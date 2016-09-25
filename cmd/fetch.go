@@ -57,7 +57,6 @@ var fetchCmd = &cobra.Command{
 		if err != nil {
 			log.Fatalln("Error parsing config file", err)
 		}
-		log.Println("fetch called")
 		workQueue := make(chan *nzbfile.SegmentRequest, 100)
 		var wg sync.WaitGroup
 
@@ -68,7 +67,6 @@ var fetchCmd = &cobra.Command{
 		}
 
 		for _, s := range c.Servers {
-			log.Println(s)
 			nntp.BuildWorkers(workQueue, len(c.Servers), s.Connections, s.Port, s.Host, s.Username, s.Password, true, "incomplete")
 		}
 

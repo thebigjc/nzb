@@ -40,7 +40,6 @@ func BuildWorkers(workQueue chan *nzbfile.SegmentRequest, numServers, conn, port
 	}
 
 	for i := 0; i < conn; i++ {
-		log.Println("Opening connection:", i+1)
 		worker := NewNNTPWorker(i+1, workQueue, &connInfo)
 		go worker.Start()
 	}
@@ -157,8 +156,6 @@ func (w *Worker) Start() {
 			log.Panicln("Unexpected retcode:", retcode)
 		}
 
-		log.Println("Connected", w.ID)
-
 		userLoginStr := fmt.Sprintf("AUTHINFO USER %s", w.Config.user)
 		retcode, err = w.SendLine(userLoginStr, 381)
 
@@ -172,8 +169,6 @@ func (w *Worker) Start() {
 		if err != nil {
 			log.Panicln("Pass failed", err)
 		}
-
-		log.Println("Logged in", w.ID)
 	}
 
 	go func() {
