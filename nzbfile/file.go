@@ -35,17 +35,23 @@ type Segment struct {
 }
 
 type SegmentRequest struct {
-	group     []string
-	MessageID string
-	filename  string
-	workGroup *sync.WaitGroup
-	nzb       *Nzb
+	group         []string
+	MessageID     string
+	filename      string
+	workGroup     *sync.WaitGroup
+	nzb           *Nzb
+	ExcludedHosts []string
 }
 
-func (s *SegmentRequest) BuildWriter(outDir string, filename string) (io.WriterAt, error) {
+type WriterAtCloser interface {
+	io.WriterAt
+	io.Closer
+}
+
+func (s *SegmentRequest) BuildWriter(outDir string, filename string) (WriterAtCloser, error) {
 	dirName := path.Join(outDir, s.nzb.jobName)
 
-	err := os.MkdirAll(dirName, 0777)
+	err := os.MkdirAll(dirName, 0700)
 	if err != nil {
 		return nil, err
 	}
@@ -71,25 +77,6 @@ func NewNZB(nzbfile []byte, jobName string) (*Nzb, error) {
 		return nil, err
 	}
 
-	var size int64
-
-	for _, file := range nzb.File {
-		if strings.Contains(file.Subject, "par2") {
-			continue
-		}
-		for _, seg := range file.Segment {
-			size += seg.Bytes
-		}
-	}
-
-	log.Println("Unmarshall", len(nzb.File), size)
-
-	bar := pb.New64(size).Prefix(jobName + " ")
-	bar.ShowSpeed = true
-	bar.SetUnits(pb.U_BYTES)
-	bar.Start()
-	nzb.progress = bar
-
 	return &nzb, nil
 }
 
@@ -103,12 +90,17 @@ func (n *Nzb) extractFileName(subject string) string {
 }
 
 func (n *Nzb) EnqueueFetches(workQueue chan *SegmentRequest, wg *sync.WaitGroup) {
+	var size int64
+
 	for _, file := range n.File {
 		filename := n.extractFileName(file.Subject)
-		if strings.Contains(filename, "par2") {
-			continue
+		if !strings.Contains(strings.ToLower(filename), "par2") {
+			log.Println("Skipping", filename)
+			//		continue
 		}
+
 		for _, seg := range file.Segment {
+			size += seg.Bytes
 			wg.Add(1)
 			seg := SegmentRequest{group: file.Group, MessageID: seg.MessageID, filename: filename, workGroup: wg, nzb: n}
 			go func(seg *SegmentRequest) {
@@ -116,6 +108,13 @@ func (n *Nzb) EnqueueFetches(workQueue chan *SegmentRequest, wg *sync.WaitGroup)
 			}(&seg)
 		}
 	}
+
+	bar := pb.New64(size).Prefix(n.jobName + " ")
+	bar.ShowSpeed = true
+	bar.SetUnits(pb.U_BYTES)
+	bar.Start()
+	n.progress = bar
+
 }
 
 func (n *Nzb) Complete(bytes int) {

@@ -24,7 +24,6 @@ import (
 	"sync"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 	"github.com/thebigjc/nzb/nntp"
 	"github.com/thebigjc/nzb/nzbfile"
 	"gopkg.in/yaml.v2"
@@ -64,14 +63,15 @@ var fetchCmd = &cobra.Command{
 
 		log.Printf("Found %d servers\n", len(c.Servers))
 
-		for _, s := range c.Servers {
-			log.Println(s)
-			nntp.BuildWorkers(workQueue, s.Connections, s.Port, s.Host, s.Username, s.Password, true, "incomplete")
-		}
-
 		for _, arg := range args {
 			FetchNzbFromFile(arg, workQueue, &wg)
 		}
+
+		for _, s := range c.Servers {
+			log.Println(s)
+			nntp.BuildWorkers(workQueue, len(c.Servers), s.Connections, s.Port, s.Host, s.Username, s.Password, true, "incomplete")
+		}
+
 		wg.Wait()
 	},
 }
@@ -95,20 +95,4 @@ func FetchNzbFromFile(filename string, workQueue chan *nzbfile.SegmentRequest, w
 
 func init() {
 	RootCmd.AddCommand(fetchCmd)
-
-	flags := fetchCmd.Flags()
-
-	flagNames := []string{"host", "port", "username", "password", "use-tls", "conn", "incomplete"}
-
-	flags.String("host", "", "The newsreader host to download from")
-	flags.Int("port", 0, "The newsreader port to download from")
-	flags.Int("conn", 10, "The number of connections to open")
-	flags.String("username", "", "The user to login as")
-	flags.String("password", "", "The password to login with")
-	flags.String("incomplete", "incomplete", "The directory to store downloads in")
-	flags.Bool("use-tls", true, "Whether to use TLS to talk to the server")
-
-	for _, flag := range flagNames {
-		viper.BindPFlag(flag, flags.Lookup(flag))
-	}
 }

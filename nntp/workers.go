@@ -16,15 +16,16 @@ import (
 var crlf = []byte{'\r', '\n'}
 
 type ConfInfo struct {
-	port   int
-	host   string
-	user   string
-	pass   string
-	useTLS bool
-	outDir string
+	port       int
+	host       string
+	user       string
+	pass       string
+	useTLS     bool
+	outDir     string
+	numServers int
 }
 
-func BuildWorkers(workQueue chan *nzbfile.SegmentRequest, conn, port int, host, user, pass string, useTLS bool, outDir string) {
+func BuildWorkers(workQueue chan *nzbfile.SegmentRequest, numServers, conn, port int, host, user, pass string, useTLS bool, outDir string) {
 	connInfo := ConfInfo{
 		port,
 		host,
@@ -32,50 +33,33 @@ func BuildWorkers(workQueue chan *nzbfile.SegmentRequest, conn, port int, host, 
 		pass,
 		useTLS,
 		outDir,
+		numServers,
 	}
-
-	var workerQueue chan chan *nzbfile.SegmentRequest
-	workerQueue = make(chan chan *nzbfile.SegmentRequest, conn)
 
 	for i := 0; i < conn; i++ {
 		log.Println("Opening connection:", i+1)
-		worker := NewNNTPWorker(i+1, workerQueue, &connInfo)
+		worker := NewNNTPWorker(i+1, workQueue, &connInfo)
 		go worker.Start()
 	}
-
-	go func() {
-		for {
-			select {
-			case work := <-workQueue:
-				//log.Println("Received work request")
-				go func() {
-					worker := <-workerQueue
-
-					//log.Println("Dispatching work request")
-					worker <- work
-				}()
-			}
-		}
-	}()
 }
 
 type Worker struct {
-	ID          int
-	Work        chan *nzbfile.SegmentRequest
-	WorkerQueue chan chan *nzbfile.SegmentRequest
-	QuitChan    chan bool
-	Config      *ConfInfo
-	rw          *bufio.ReadWriter
+	ID        int
+	WorkQueue chan *nzbfile.SegmentRequest
+	QuitChan  chan bool
+	Config    *ConfInfo
+	Name      string
+	rw        *bufio.ReadWriter
 }
 
-func NewNNTPWorker(id int, workerQueue chan chan *nzbfile.SegmentRequest, connInfo *ConfInfo) Worker {
+func NewNNTPWorker(id int, workQueue chan *nzbfile.SegmentRequest, connInfo *ConfInfo) Worker {
 	// Create, and return the worker.
 	worker := Worker{
-		ID:          id,
-		Work:        make(chan *nzbfile.SegmentRequest),
-		WorkerQueue: workerQueue,
-		QuitChan:    make(chan bool),
-		Config:      connInfo,
+		ID:        id,
+		WorkQueue: workQueue,
+		QuitChan:  make(chan bool),
+		Config:    connInfo,
+		Name:      fmt.Sprintf("%s:%d", connInfo.host, connInfo.port),
 	}
 
 	return worker
@@ -175,15 +159,32 @@ func (w *Worker) Start() {
 
 	go func() {
 		for {
-			// Add ourselves into the worker queue.
-			w.WorkerQueue <- w.Work
-
 			select {
-			case work := <-w.Work:
+			case work := <-w.WorkQueue:
+				if len(work.ExcludedHosts) >= w.Config.numServers {
+					log.Println("Article is lost", work.MessageID)
+					work.Observe(0)
+					break
+				}
+
+				for _, name := range work.ExcludedHosts {
+					if name == w.Name {
+						w.WorkQueue <- work
+						break
+					}
+				}
+
 				// Receive a work request.
-				//log.Printf("worker%d: Received work request, fetching Message ID %s\n", w.ID, work.MessageID)
 				articleLine := fmt.Sprintf("BODY <%s>", work.MessageID)
 				retcode, err := w.SendLine(articleLine, 222)
+
+				if retcode == 430 {
+					log.Println("Requeuing article", work.MessageID)
+					work.ExcludedHosts = append(work.ExcludedHosts, w.Name)
+					w.WorkQueue <- work
+					break
+				}
+
 				if err != nil {
 					log.Println("Failed to fetch article", work.MessageID, retcode, err)
 					work.Observe(0)
@@ -199,6 +200,8 @@ func (w *Worker) Start() {
 
 				go func(y *yenc.Yenc, s *nzbfile.SegmentRequest, outDir string, count int) {
 					w, err := s.BuildWriter(outDir, y.Name)
+					defer w.Close()
+
 					if err != nil {
 						log.Fatalln("Failed to create writer", err)
 					}
