@@ -112,8 +112,6 @@ func ReadYenc(r io.Reader) (*Yenc, error) {
 	var lines []byte
 	var y Yenc
 	y.crcHash = crc32.NewIEEE()
-	eof := []byte{'.'}
-	dotdot := []byte{'.', '.'}
 	outside := true
 
 	br := bufio.NewReader(r)
@@ -134,15 +132,6 @@ func ReadYenc(r io.Reader) (*Yenc, error) {
 
 		if len(line) == 0 {
 			continue
-		}
-
-		if bytes.HasPrefix(line, dotdot) {
-			line = line[1:]
-		}
-
-		if bytes.Compare(line, eof) == 0 {
-			y.body = lines
-			return &y, nil
 		}
 
 		if line[0] == '=' {
@@ -201,7 +190,7 @@ func (y *Yenc) SaveBody(w io.WriterAt) error {
 	sum := y.crcHash.Sum32()
 
 	if y.EndSize != len(y.body) {
-		return errors.Errorf("Body size doesn't match %d != %d", y.EndSize, len(y.body))
+		return errors.Errorf("Body size doesn't match. Expected:%d, got %d", y.EndSize, len(y.body))
 	}
 
 	if y.pcrc32 != sum {

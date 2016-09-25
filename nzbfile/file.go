@@ -35,12 +35,15 @@ type Segment struct {
 }
 
 type SegmentRequest struct {
-	group         []string
 	MessageID     string
+	Bytes         int64
 	filename      string
 	workGroup     *sync.WaitGroup
 	nzb           *Nzb
-	ExcludedHosts []string
+	excludedHosts map[string]bool
+	workQueue     chan *SegmentRequest
+	failed        bool
+	done          bool
 }
 
 type WriterAtCloser interface {
@@ -57,6 +60,7 @@ func (s *SegmentRequest) BuildWriter(outDir string, filename string) (WriterAtCl
 	}
 
 	outName := path.Join(outDir, s.nzb.jobName, filename)
+
 	f, err := os.OpenFile(outName, os.O_WRONLY|os.O_CREATE, 0666)
 	if err != nil {
 		return nil, err
@@ -65,9 +69,46 @@ func (s *SegmentRequest) BuildWriter(outDir string, filename string) (WriterAtCl
 	return f, nil
 }
 
-func (s *SegmentRequest) Observe(count int) {
-	s.nzb.Complete(count)
-	s.workGroup.Done()
+func (s *SegmentRequest) Done() {
+	if !s.done {
+		s.done = true
+		s.nzb.Complete(s.Bytes)
+		s.workGroup.Done()
+	}
+}
+
+func (s *SegmentRequest) FailServer(server string, numServers int) {
+	log.Printf("Failing server %s for message %s\n", server, s.MessageID)
+	if s.excludedHosts == nil {
+		s.excludedHosts = make(map[string]bool)
+	}
+	s.excludedHosts[server] = true
+
+	if len(s.excludedHosts) >= numServers {
+		s.failed = true
+		log.Println("Failing Article", s.MessageID)
+		s.Done()
+		return
+	}
+	s.Queue()
+}
+
+func (s *SegmentRequest) Queue() {
+	if s.done || s.failed {
+		return
+	}
+
+	s.workQueue <- s
+}
+
+func (s *SegmentRequest) RequeueIfFailed(server string) bool {
+	if val, ok := s.excludedHosts[server]; ok && val {
+		log.Printf("Already failed at %s on %s\n", s.MessageID, server)
+		s.Queue()
+		return true
+	}
+
+	return false
 }
 
 func NewNZB(nzbfile []byte, jobName string) (*Nzb, error) {
@@ -96,16 +137,14 @@ func (n *Nzb) EnqueueFetches(workQueue chan *SegmentRequest, wg *sync.WaitGroup)
 		filename := n.extractFileName(file.Subject)
 		if !strings.Contains(strings.ToLower(filename), "par2") {
 			log.Println("Skipping", filename)
-			//		continue
+			//continue
 		}
 
 		for _, seg := range file.Segment {
 			size += seg.Bytes
 			wg.Add(1)
-			seg := SegmentRequest{group: file.Group, MessageID: seg.MessageID, filename: filename, workGroup: wg, nzb: n}
-			go func(seg *SegmentRequest) {
-				workQueue <- seg
-			}(&seg)
+			seg := SegmentRequest{MessageID: seg.MessageID, filename: filename, workGroup: wg, nzb: n, workQueue: workQueue, Bytes: seg.Bytes}
+			go seg.Queue()
 		}
 	}
 
@@ -117,6 +156,6 @@ func (n *Nzb) EnqueueFetches(workQueue chan *SegmentRequest, wg *sync.WaitGroup)
 
 }
 
-func (n *Nzb) Complete(bytes int) {
-	n.progress.Add(bytes)
+func (n *Nzb) Complete(bytes int64) {
+	n.progress.Add64(bytes)
 }

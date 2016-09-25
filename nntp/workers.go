@@ -2,6 +2,7 @@ package nntp
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -14,6 +15,8 @@ import (
 )
 
 var crlf = []byte{'\r', '\n'}
+var dotdot = []byte{'.', '.'}
+var dot = []byte{'.'}
 
 type ConfInfo struct {
 	port       int
@@ -101,15 +104,31 @@ func (w *Worker) SendLine(line string, expectedRet int) (retcode int, err error)
 	return retcode, nil
 }
 
-type counterReader struct {
-	Count int
-	r     io.Reader
-}
+func ReadBody(r *bufio.Reader) (body []byte, err error) {
+	var b bytes.Buffer
 
-func (c *counterReader) Read(p []byte) (n int, err error) {
-	n, err = c.r.Read(p)
-	c.Count += n
-	return n, err
+	for {
+		line, _, err := r.ReadLine()
+
+		if err == io.EOF {
+			return b.Bytes(), err
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		if bytes.HasPrefix(line, dotdot) {
+			line = line[1:]
+		}
+
+		if bytes.Compare(line, dot) == 0 {
+			return b.Bytes(), nil
+		}
+
+		b.Write(line)
+		b.Write(crlf)
+	}
 }
 
 func (w *Worker) Start() {
@@ -161,17 +180,8 @@ func (w *Worker) Start() {
 		for {
 			select {
 			case work := <-w.WorkQueue:
-				if len(work.ExcludedHosts) >= w.Config.numServers {
-					log.Println("Article is lost", work.MessageID)
-					work.Observe(0)
+				if work.RequeueIfFailed(w.Name) {
 					break
-				}
-
-				for _, name := range work.ExcludedHosts {
-					if name == w.Name {
-						w.WorkQueue <- work
-						break
-					}
 				}
 
 				// Receive a work request.
@@ -180,37 +190,41 @@ func (w *Worker) Start() {
 
 				if retcode == 430 {
 					log.Println("Requeuing article", work.MessageID)
-					work.ExcludedHosts = append(work.ExcludedHosts, w.Name)
-					w.WorkQueue <- work
+					work.FailServer(w.Name, w.Config.numServers)
 					break
 				}
 
 				if err != nil {
 					log.Println("Failed to fetch article", work.MessageID, retcode, err)
-					work.Observe(0)
+					work.FailServer(w.Name, w.Config.numServers)
 					break
 				}
 
-				cr := &counterReader{r: w.rw.Reader}
-				y, err := yenc.ReadYenc(cr)
+				body, err := ReadBody(w.rw.Reader)
+
+				y, err := yenc.ReadYenc(bytes.NewBuffer(body))
 
 				if err != nil {
 					log.Fatalln("Failed to read body", err)
 				}
 
-				go func(y *yenc.Yenc, s *nzbfile.SegmentRequest, outDir string, count int) {
+				go func(y *yenc.Yenc, s *nzbfile.SegmentRequest, outDir string, server string, numServers int) {
 					w, err := s.BuildWriter(outDir, y.Name)
 					defer w.Close()
 
 					if err != nil {
-						log.Fatalln("Failed to create writer", err)
+						log.Println("Failed to create writer", err)
+						s.FailServer(server, numServers)
+						return
 					}
 					err = y.SaveBody(w)
 					if err != nil {
-						log.Fatalln("Failed to save message body.", err)
+						log.Println("Failed to save message body.", err)
+						s.FailServer(server, numServers)
+						return
 					}
-					s.Observe(count)
-				}(y, work, w.Config.outDir, cr.Count)
+					s.Done()
+				}(y, work, w.Config.outDir, w.Name, w.Config.numServers)
 
 			case <-w.QuitChan:
 				// We have been asked to stop.
