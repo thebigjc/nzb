@@ -58,23 +58,49 @@ var fetchCmd = &cobra.Command{
 			log.Fatalln("Error parsing config file", err)
 		}
 		workQueue := make(chan *nzbfile.SegmentRequest, 100)
-		var wg sync.WaitGroup
 
 		log.Printf("Found %d servers\n", len(c.Servers))
 
-		for _, arg := range args {
-			FetchNzbFromFile(arg, workQueue, &wg)
-		}
+		// TODO: Cleanup this method
+
+		var wg sync.WaitGroup
+
+		var ns []*nzbfile.Nzb
 
 		for _, s := range c.Servers {
 			nntp.BuildWorkers(workQueue, len(c.Servers), s.Connections, s.Port, s.Host, s.Username, s.Password, true, "incomplete")
+		}
+
+		for _, arg := range args {
+			ns = append(ns, FetchNzbFromFile(arg, workQueue, &wg))
+		}
+
+		wg.Wait()
+
+		var parns []*nzbfile.Nzb
+
+		var failedAny bool
+
+		for _, n := range ns {
+			log.Printf("Completed %s. %d done, %d failed\n", n.JobName, n.DoneCount, n.FailedCount)
+			if n.FailedCount > 0 {
+				n.EnqueueFetches(workQueue, true)
+				parns = append(parns, n)
+				failedAny = true
+			}
+		}
+
+		if failedAny {
+			for _, n := range parns {
+				log.Printf("Completed PAR2 %s. %d done, %d failed\n", n.JobName, n.DoneCount, n.FailedCount)
+			}
 		}
 
 		wg.Wait()
 	},
 }
 
-func FetchNzbFromFile(filename string, workQueue chan *nzbfile.SegmentRequest, wg *sync.WaitGroup) {
+func FetchNzbFromFile(filename string, workQueue chan *nzbfile.SegmentRequest, wg *sync.WaitGroup) *nzbfile.Nzb {
 	nzbBytes, err := ioutil.ReadFile(filename)
 	if err != nil {
 		log.Fatalf("Error reading from %s: %v\n", filename, err)
@@ -83,12 +109,14 @@ func FetchNzbFromFile(filename string, workQueue chan *nzbfile.SegmentRequest, w
 	basename := path.Base(filename)
 	name := strings.TrimSuffix(basename, filepath.Ext(basename))
 
-	nzbFile, err := nzbfile.NewNZB(nzbBytes, name)
+	nzbFile, err := nzbfile.NewNZB(nzbBytes, name, wg)
 	if err != nil {
 		log.Fatalf("Error parsing %s: %v\n", filename, err)
 	}
 
-	nzbFile.EnqueueFetches(workQueue, wg)
+	nzbFile.EnqueueFetches(workQueue, false)
+
+	return nzbFile
 }
 
 func init() {

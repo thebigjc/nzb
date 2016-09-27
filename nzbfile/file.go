@@ -9,15 +9,20 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cheggaaa/pb"
 )
 
 type Nzb struct {
-	File     []File `xml:"file"`
-	jobName  string
-	fileRe   *regexp.Regexp
-	progress *pb.ProgressBar
+	File        []File `xml:"file"`
+	JobName     string
+	fileRe      *regexp.Regexp
+	progress    *pb.ProgressBar
+	DoneCount   int32
+	FailedCount int32
+	TotalCount  int32
+	wg          *sync.WaitGroup
 }
 
 type File struct {
@@ -51,15 +56,23 @@ type WriterAtCloser interface {
 	io.Closer
 }
 
+func (n *Nzb) Done(failed bool) {
+	n.wg.Done()
+	atomic.AddInt32(&n.DoneCount, 1)
+	if failed {
+		atomic.AddInt32(&n.FailedCount, 1)
+	}
+}
+
 func (s *SegmentRequest) BuildWriter(outDir string, filename string) (WriterAtCloser, error) {
-	dirName := path.Join(outDir, s.nzb.jobName)
+	dirName := path.Join(outDir, s.nzb.JobName)
 
 	err := os.MkdirAll(dirName, 0700)
 	if err != nil {
 		return nil, err
 	}
 
-	outName := path.Join(outDir, s.nzb.jobName, filename)
+	outName := path.Join(outDir, s.nzb.JobName, filename)
 
 	f, err := os.OpenFile(outName, os.O_WRONLY|os.O_CREATE, 0666)
 	if err != nil {
@@ -73,7 +86,8 @@ func (s *SegmentRequest) Done() {
 	if !s.done {
 		s.done = true
 		s.nzb.Complete(s.Bytes)
-		s.workGroup.Done()
+
+		s.nzb.Done(false)
 	}
 }
 
@@ -82,6 +96,7 @@ func (s *SegmentRequest) FailServer(server string, numServers int) {
 	if s.excludedHosts == nil {
 		s.excludedHosts = make(map[string]bool)
 	}
+
 	s.excludedHosts[server] = true
 
 	if len(s.excludedHosts) >= numServers {
@@ -111,8 +126,8 @@ func (s *SegmentRequest) RequeueIfFailed(server string) bool {
 	return false
 }
 
-func NewNZB(nzbfile []byte, jobName string) (*Nzb, error) {
-	nzb := Nzb{jobName: jobName, fileRe: regexp.MustCompile(`"(.*)"`)}
+func NewNZB(nzbfile []byte, jobName string, wg *sync.WaitGroup) (*Nzb, error) {
+	nzb := Nzb{JobName: jobName, fileRe: regexp.MustCompile(`"(.*)"`), wg: wg}
 	err := xml.Unmarshal(nzbfile, &nzb)
 	if err != nil {
 		return nil, err
@@ -130,25 +145,28 @@ func (n *Nzb) extractFileName(subject string) string {
 	return string(submatches[0])
 }
 
-func (n *Nzb) EnqueueFetches(workQueue chan *SegmentRequest, wg *sync.WaitGroup) {
+func (n *Nzb) EnqueueFetches(workQueue chan *SegmentRequest, fetchPar2 bool) {
 	var size int64
+	n.FailedCount = 0
+	n.DoneCount = 0
 
 	for _, file := range n.File {
 		filename := n.extractFileName(file.Subject)
-		if !strings.Contains(strings.ToLower(filename), "par2") {
+		isPar2 := strings.Contains(strings.ToLower(filename), "par2")
+		if fetchPar2 != isPar2 {
 			log.Println("Skipping", filename)
-			//continue
+			continue
 		}
 
 		for _, seg := range file.Segment {
 			size += seg.Bytes
-			wg.Add(1)
-			seg := SegmentRequest{MessageID: seg.MessageID, filename: filename, workGroup: wg, nzb: n, workQueue: workQueue, Bytes: seg.Bytes}
+			n.wg.Add(1)
+			seg := SegmentRequest{MessageID: seg.MessageID, filename: filename, nzb: n, workQueue: workQueue, Bytes: seg.Bytes}
 			go seg.Queue()
 		}
 	}
 
-	bar := pb.New64(size).Prefix(n.jobName + " ")
+	bar := pb.New64(size).Prefix(n.JobName + " ")
 	bar.ShowSpeed = true
 	bar.SetUnits(pb.U_BYTES)
 	bar.Start()

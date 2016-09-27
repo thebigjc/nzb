@@ -96,6 +96,10 @@ func (w *Worker) SendLine(line string, expectedRet int) (retcode int, err error)
 	}
 
 	retcode, err = w.ReadRetcode()
+	if err != nil {
+		return retcode, err
+	}
+
 	if retcode != expectedRet {
 		return retcode, errors.Errorf("Unexpected retcode %d != %d", retcode, expectedRet)
 	}
