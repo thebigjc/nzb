@@ -222,7 +222,7 @@ func (w *Worker) Start() {
 						s.FailServer(server, numServers)
 						return
 					}
-					s.Done()
+					s.Done(false)
 				}(y, work, w.Config.outDir, w.Name, w.Config.numServers)
 
 			case <-w.QuitChan:

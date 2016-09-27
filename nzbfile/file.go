@@ -82,12 +82,15 @@ func (s *SegmentRequest) BuildWriter(outDir string, filename string) (WriterAtCl
 	return f, nil
 }
 
-func (s *SegmentRequest) Done() {
+func (s *SegmentRequest) Done(fail bool) {
 	if !s.done {
 		s.done = true
+		if fail {
+			s.failed = true
+		}
 		s.nzb.Complete(s.Bytes)
 
-		s.nzb.Done(false)
+		s.nzb.Done(fail)
 	}
 }
 
@@ -100,9 +103,8 @@ func (s *SegmentRequest) FailServer(server string, numServers int) {
 	s.excludedHosts[server] = true
 
 	if len(s.excludedHosts) >= numServers {
-		s.failed = true
+		s.Done(true)
 		log.Println("Failing Article", s.MessageID)
-		s.Done()
 		return
 	}
 	s.Queue()

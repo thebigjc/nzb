@@ -90,13 +90,13 @@ var fetchCmd = &cobra.Command{
 			}
 		}
 
+		wg.Wait()
+
 		if failedAny {
 			for _, n := range parns {
 				log.Printf("Completed PAR2 %s. %d done, %d failed\n", n.JobName, n.DoneCount, n.FailedCount)
 			}
 		}
-
-		wg.Wait()
 	},
 }
 
